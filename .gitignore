@@ -1,0 +1,13 @@
+input/
+output/
+
+venv/
+env/
+__pycache__/
+*.pyc
+
+.DS_Store
+
+datasets/
+*.wav
+*.mp3
