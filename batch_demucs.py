@@ -146,7 +146,7 @@ def mix_stems(stem_paths: List[Path]) -> Tuple[np.ndarray, int]:
 
 def discover_audio_files(input_dir: Path) -> List[Path]:
     """
-    Mencari semua file audio (.mp3 / .wav) di dalam folder input.
+    Mencari semua file audio (.mp3 / .wav) di dalam folder input secara rekursif.
 
     Args:
         input_dir: Path ke folder yang berisi file audio.
@@ -161,18 +161,20 @@ def discover_audio_files(input_dir: Path) -> List[Path]:
     if not input_dir.exists():
         raise FileNotFoundError(f"Folder input tidak ditemukan: {input_dir}")
 
-    audio_files = sorted(
-        f for f in input_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in SUPPORTED_EXTENSIONS
-    )
+    audio_files = []
+    for ext in SUPPORTED_EXTENSIONS:
+        audio_files.extend(input_dir.rglob(f"*{ext}"))
+        audio_files.extend(input_dir.rglob(f"*{ext.upper()}"))
+    
+    audio_files = sorted(list(set(audio_files)))
 
     if not audio_files:
         raise ValueError(
             f"Tidak ada file audio ({', '.join(SUPPORTED_EXTENSIONS)}) "
-            f"di dalam folder: {input_dir}"
+            f"di dalam folder (atau subfolder): {input_dir}"
         )
 
-    logger.info("Ditemukan %d file audio di '%s'", len(audio_files), input_dir)
+    logger.info("Ditemukan %d file audio di '%s' (termasuk subfolder)", len(audio_files), input_dir)
     return audio_files
 
 
@@ -225,25 +227,23 @@ def collect_individual_stems(
     output_dir: Path,
     original_stem_name: str,
     stems_to_collect: List[str],
+    artist_name: str = "Unknown",
 ) -> Dict[str, Path]:
     """
     Menyalin stem individual dari hasil Demucs ke subfolder output.
 
     Struktur output:
         output_dir/
-          vocals/   <nama>_vocals.wav
-          guitar/   <nama>_guitar.wav
-          piano/    <nama>_piano.wav
-          bass/     <nama>_bass.wav
+          <stem>/
+            <artist_name>/
+              <nama>_<stem>.wav
 
     Args:
         demucs_result_dir:  Folder hasil Demucs (berisi *.wav per stem).
         output_dir:         Root folder tujuan output.
         original_stem_name: Nama file asli tanpa ekstensi.
         stems_to_collect:   List nama stem yang ingin dikumpulkan.
-
-    Returns:
-        Dict {stem_name: Path ke file yang sudah disalin}.
+        artist_name:        Nama artist untuk subfolder.
     """
     collected: Dict[str, Path] = {}
 
@@ -254,13 +254,13 @@ def collect_individual_stems(
             logger.warning("Stem '%s' tidak ditemukan: %s", stem, src)
             continue
 
-        dest_dir = output_dir / stem
+        dest_dir = output_dir / stem / artist_name
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{original_stem_name}_{stem}.wav"
 
         shutil.copy2(str(src), str(dest))
         collected[stem] = src  # simpan path sumber untuk mixing
-        logger.info("  [%s] → %s", stem, dest.name)
+        logger.info("  [%s] → %s", stem, dest.relative_to(output_dir))
 
     return collected
 
@@ -270,15 +270,17 @@ def create_stem_mixes(
     output_dir: Path,
     original_stem_name: str,
     mixes: Dict[str, List[str]],
+    artist_name: str = "Unknown",
 ) -> None:
     """
-    Membuat file campuran stem dan menyimpannya ke subfolder 'mixes/'.
+    Membuat file campuran stem dan menyimpannya ke subfolder output.
 
     Args:
         demucs_result_dir:  Folder hasil Demucs.
         output_dir:         Root folder output.
         original_stem_name: Nama file asli tanpa ekstensi.
         mixes:              Dict {nama_mix: [stem1, stem2, ...]}.
+        artist_name:        Nama artist untuk subfolder.
     """
     if not _HAS_SOUNDFILE:
         logger.warning("Melewati pembuatan mix — soundfile tidak terinstall.")
@@ -304,11 +306,11 @@ def create_stem_mixes(
 
         try:
             mixed_audio, sr = mix_stems(stem_paths)
-            mix_dir = output_dir / mix_name
+            mix_dir = output_dir / mix_name / artist_name
             mix_dir.mkdir(parents=True, exist_ok=True)
             dest = mix_dir / f"{original_stem_name}_{mix_name}.wav"
             save_wav(dest, mixed_audio, sr)
-            logger.info("  [mix:%s] → %s", mix_name, dest.name)
+            logger.info("  [mix:%s] → %s", mix_name, dest.relative_to(output_dir))
 
         except Exception as e:
             logger.error("Gagal membuat mix '%s': %s", mix_name, e)
@@ -383,6 +385,18 @@ def process_batch(
         )
 
         try:
+            # Tentukan nama artist berdasarkan struktur folder atau nama file
+            relative_path = audio_path.relative_to(input_dir)
+            if len(relative_path.parts) > 1:
+                # Jika di dalam subfolder, gunakan nama subfolder pertama sebagai artist
+                artist_name = relative_path.parts[0]
+            else:
+                # Jika di root, coba ambil dari nama file: "artist-title"
+                if "-" in audio_path.stem:
+                    artist_name = audio_path.stem.split("-")[0].strip()
+                else:
+                    artist_name = "Unknown"
+
             # 1. Jalankan Demucs
             result_dir = run_demucs(audio_path, demucs_temp_dir, device)
 
@@ -392,6 +406,7 @@ def process_batch(
                 output_dir=output_dir,
                 original_stem_name=audio_path.stem,
                 stems_to_collect=individual_stems,
+                artist_name=artist_name,
             )
 
             # 3. Buat campuran kustom
@@ -400,6 +415,7 @@ def process_batch(
                 output_dir=output_dir,
                 original_stem_name=audio_path.stem,
                 mixes=stem_mixes,
+                artist_name=artist_name,
             )
 
             # 4. Bersihkan folder temp
